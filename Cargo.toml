@@ -1,0 +1,14 @@
+[package]
+name = "jerbs"
+version = "0.1.0"
+edition = "2018"
+authors = ["Kaz Wesley <kaz@lambdaverse.org>"]
+description = "Command-line work-stealing scheduler."
+repository = "https://github.com/kazcw/jerbs"
+license = "GPL-3.0"
+categories = ["command-line-utilities"]
+exclude = [".gitignore"]
+
+[dependencies]
+clap = "2.33"
+rusqlite = "0.26"
