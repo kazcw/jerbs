@@ -10,5 +10,6 @@ categories = ["command-line-utilities"]
 exclude = [".gitignore"]
 
 [dependencies]
+anyhow = "1.0"
 clap = "2.33"
 rusqlite = "0.26"

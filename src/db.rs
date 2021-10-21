@@ -1,21 +1,27 @@
 use rusqlite::params;
 use rusqlite::Connection;
+use std::fmt::{self, Display};
 
 const DB_VERSION: i32 = 1;
 
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    SqliteError(rusqlite::Error),
     DbTooNew { db_version: i32 },
 }
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl From<rusqlite::Error> for Error {
-    fn from(e: rusqlite::Error) -> Self {
-        Error::SqliteError(e)
+impl Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::DbTooNew { db_version } =>
+                write!(f,
+                       "Database schema is from a newer version of jerbs! Version found: {}. Max version supported: {}.",
+                       db_version,
+                       DB_VERSION)
+        }
     }
 }
+impl std::error::Error for Error {}
+pub type Result<T> = anyhow::Result<T>;
 
 struct Job {
     id: i32,
@@ -60,7 +66,8 @@ impl Db {
             if version > DB_VERSION {
                 return Err(Error::DbTooNew {
                     db_version: version,
-                });
+                }
+                .into());
             }
         }
         Ok(Self { conn })
