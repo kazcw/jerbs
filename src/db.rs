@@ -107,30 +107,39 @@ impl Db {
 
     // TODO: iterator version. Has to own its Statement.
     pub fn job_ids_vec(&self) -> Result<Vec<u32>> {
-        let mut q = self.conn.prepare("SELECT id FROM job")?;
+        let mut q = self.conn.prepare("SELECT id, count FROM job")?;
         let mut results = Vec::new();
         let mut rows = q.query([])?;
         while let Some(row) = rows.next()? {
-            results.push(row.get(0).unwrap());
+            let id = row.get(0).unwrap();
+            let count: u64 = row.get(1).unwrap();
+            let w = self.worker_count(id)?;
+            if count > w {
+                results.push(id);
+            }
         }
         Ok(results)
     }
 
-    pub fn get_data(&mut self, job_id: u32) -> Result<Vec<u8>> {
+    pub fn get_data(&self, job_id: u32) -> Result<Vec<u8>> {
         let mut q = self.conn.prepare("SELECT data FROM job WHERE id = ?")?;
         let mut result = q.query([job_id])?;
         result.next()?.unwrap().get(0).map_err(From::from)
     }
 
-    pub fn get_count(&mut self, job_id: u32) -> Result<u64> {
-        let mut q_c = self.conn.prepare("SELECT count FROM job WHERE id = ?")?;
+    fn worker_count(&self, job_id: u32) -> Result<u64> {
         let mut q_w = self
             .conn
             .prepare("SELECT count(1) FROM worker WHERE job = ?")?;
-        let mut c = q_c.query([job_id])?;
         let mut w = q_w.query([job_id])?;
+        Ok(w.next()?.unwrap().get(0)?)
+    }
+
+    pub fn get_count(&self, job_id: u32) -> Result<u64> {
+        let mut q_c = self.conn.prepare("SELECT count FROM job WHERE id = ?")?;
+        let mut c = q_c.query([job_id])?;
         let c: u64 = c.next()?.unwrap().get(0)?;
-        let w: u64 = w.next()?.unwrap().get(0)?;
+        let w = self.worker_count(job_id)?;
         debug_assert!(c >= w);
         Ok(if w > c { 0 } else { c - w })
     }
@@ -193,6 +202,7 @@ mod test {
         let result = db.take("some worker id")?;
         assert_eq!(result, None);
         assert_eq!(db.get_count(id)?, 0);
+        assert_eq!(db.job_ids_vec()?.len(), 0);
 
         Ok(())
     }

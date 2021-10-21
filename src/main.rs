@@ -105,7 +105,7 @@ fn main() -> db::Result<()> {
         }
         ("list-jobs", Some(args)) => {
             let verbose = args.is_present("verbose");
-            let mut db = Db::open(path)?;
+            let db = Db::open(path)?;
             let ids = db.job_ids_vec()?;
             if verbose {
                 for id in ids {
