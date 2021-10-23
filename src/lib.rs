@@ -6,8 +6,8 @@ use std::fmt::{self, Display};
 
 const DB_VERSION: u32 = 2;
 
-type JobId = u32;
-type TaskId = u32;
+pub type JobId = u32;
+pub type TaskId = u32;
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -217,6 +217,16 @@ impl Db {
         Ok(if w > c { 0 } else { c - w })
     }
 
+    pub fn get_priority(&self, job_id: TaskId) -> Result<i32> {
+        let mut q = self
+            .conn
+            .prepare("SELECT priority FROM task WHERE id = ?")?;
+        let mut prio = q.query([job_id])?;
+        let prio = prio.next()?.unwrap();
+        let prio: Option<_> = prio.get(0)?;
+        Ok(prio.unwrap_or(0))
+    }
+
     pub fn current_job(&mut self, worker: &str) -> Result<Option<JobId>> {
         let mut q = self
             .conn
@@ -256,46 +266,66 @@ impl Db {
     }
 
     pub fn get_started_jobs(&mut self) -> Result<Vec<JobId>> {
-        let q = "SELECT job_start.job \
-                 FROM job_start \
-                 LEFT JOIN job_finish \
-                 ON job_start.job = job_finish.job \
-                 WHERE job_finish.job IS NULL
-                 ORDER BY job_start.job";
-        let mut q = self.conn.prepare(q)?;
+        // get each worker's latest job
+        let mut q0 = self
+            .conn
+            .prepare("SELECT MAX(id) FROM job GROUP BY worker ORDER BY id")?;
+        let mut worker_latest = q0.query([])?;
         let mut results = Vec::new();
-        let mut rows = q.query([])?;
-        while let Some(row) = rows.next()? {
-            results.push(row.get(0).unwrap());
+        while let Some(wl) = worker_latest.next()? {
+            let job = wl.get(0).unwrap();
+            // check if the job is started and not finished
+            let q = "SELECT 1 \
+                     FROM job_start \
+                     LEFT JOIN job_finish \
+                     ON job_start.job = job_finish.job \
+                     WHERE job_finish.job IS NULL \
+                     AND job_start.job = ?";
+            let mut q = self.conn.prepare(q)?;
+            let is_started = q.query([job])?.next()?.is_some();
+            if is_started {
+                results.push(job);
+            }
         }
         Ok(results)
     }
 
-    pub fn get_job_status(&mut self, job: JobId) -> Result<JobStatus> {
-        let conn = self.conn.transaction()?;
-        let worker = conn
+    pub fn get_job_worker(&self, job: JobId) -> Result<String> {
+        Ok(self
+            .conn
             .prepare("SELECT worker FROM job WHERE id = ?")?
             .query([job])?
             .next()?
             .expect("JobId does not exist")
             .get(0)
-            .unwrap();
-        let latest = conn
+            .unwrap())
+    }
+
+    pub fn get_worker_latest_job(&self, worker: &str) -> Result<Option<JobId>> {
+        Ok(self
+            .conn
             .prepare("SELECT id FROM job WHERE worker = ? ORDER BY id DESC")?
             .query([&worker])?
             .next()?
             .unwrap()
-            .get(0)
-            .unwrap();
-        let start = conn
+            .get(0)?)
+    }
+
+    pub fn get_job_start(&self, job: JobId) -> Result<Option<Start>> {
+        Ok(self
+            .conn
             .prepare("SELECT time, cmd FROM job_start WHERE job = ?")?
             .query([job])?
             .next()?
             .map(|row| Start {
                 time: Time(row.get(0).unwrap()),
                 cmd: row.get(1).unwrap(),
-            });
-        let finish = conn
+            }))
+    }
+
+    pub fn get_job_finish(&self, job: JobId) -> Result<Option<Finish>> {
+        Ok(self
+            .conn
             .prepare("SELECT time, result, data FROM job_finish WHERE job = ?")?
             .query([job])?
             .next()?
@@ -303,13 +333,7 @@ impl Db {
                 time: Time(row.get(0).unwrap()),
                 result: row.get(1).unwrap(),
                 data: row.get(2).unwrap(),
-            });
-        Ok(JobStatus {
-            worker,
-            is_latest: job == latest,
-            start,
-            finish,
-        })
+            }))
     }
 }
 
@@ -333,43 +357,10 @@ mod time_ {
         }
     }
 }
-use time_::Time;
-
-pub struct JobStatus {
-    worker: String,
-    is_latest: bool,
-    start: Option<Start>,
-    finish: Option<Finish>,
-}
-
-impl fmt::Display for JobStatus {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", &self.worker)?;
-        write!(f, "\t")?;
-        if let Some(ref start) = &self.start {
-            write!(f, "{}\t{}", start.time, start.cmd)?;
-        } else if self.finish.is_some() || !self.is_latest {
-            write!(f, "?\t")?;
-        } else {
-            write!(f, "\t")?;
-        }
-        write!(f, "\t")?;
-        if let Some(ref finish) = &self.finish {
-            write!(f, "{}\t{}", finish.time, finish.result)?;
-            write!(f, "\t")?;
-            match std::str::from_utf8(&finish.data) {
-                Ok(s) => write!(f, "\"{}\"", s)?,
-                Err(_) => write!(f, "<data>")?,
-            }
-        } else if !self.is_latest {
-            write!(f, "?\t?\t")?;
-        }
-        Ok(())
-    }
-}
+pub use time_::Time;
 
 #[derive(Serialize, Deserialize)]
-struct Command(Vec<Vec<u8>>);
+pub struct Command(Vec<Vec<u8>>);
 
 impl fmt::Display for Command {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -410,15 +401,15 @@ impl ToSql for Command {
     }
 }
 
-struct Start {
-    time: Time,
-    cmd: Command,
+pub struct Start {
+    pub time: Time,
+    pub cmd: Command,
 }
 
-struct Finish {
-    result: i32,
-    time: Time,
-    data: Vec<u8>,
+pub struct Finish {
+    pub result: i32,
+    pub time: Time,
+    pub data: Vec<u8>,
 }
 
 #[cfg(test)]

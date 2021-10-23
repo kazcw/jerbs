@@ -1,7 +1,10 @@
 use clap::{crate_version, App, AppSettings, Arg, SubCommand};
-use jerbs::Db;
+use jerbs::{Command, Db, Time};
+use std::collections::HashMap;
+use std::fmt::{self, Display};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStringExt;
+use tabled::{Style, Table, Tabled};
 
 fn read_data() -> Vec<u8> {
     let mut buf = Vec::new();
@@ -172,6 +175,127 @@ fn build_app(help: BuildingHelp) -> App<'static, 'static> {
     app
 }
 
+#[derive(Tabled)]
+struct Task {
+    id: u32,
+    count: u64,
+    priority: i32,
+    data: String,
+}
+
+#[derive(Tabled)]
+struct JobStatus {
+    worker: String,
+    start_time: Paw<Time>,
+    start_cmd: Paw<Command>,
+    finish_result: Paw<i32>,
+    finish_time: Paw<Time>,
+    finish_data: Paw<MaybeUtf8>,
+}
+
+enum Paw<T> {
+    Present(T),
+    Absent,
+    What,
+}
+
+impl<T> Display for Paw<T>
+where
+    T: Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Paw::Present(x) => x.fmt(f),
+            Paw::Absent => write!(f, ""),
+            Paw::What => write!(f, "?"),
+        }
+    }
+}
+
+struct MaybeUtf8(Vec<u8>);
+
+impl Display for MaybeUtf8 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(std::str::from_utf8(&self.0).unwrap_or("<data>"))
+    }
+}
+
+fn print_statuses(jobs: impl IntoIterator<Item = jerbs::JobId>, db: &Db) -> jerbs::Result<()> {
+    let mut entries = Vec::new();
+    let mut worker_latest = HashMap::new();
+    for job in jobs.into_iter() {
+        let worker = db.get_job_worker(job)?;
+        let latest = match worker_latest.get(&worker) {
+            Some(latest) => *latest,
+            None => {
+                let latest = db.get_worker_latest_job(&worker)?.unwrap();
+                worker_latest.insert(worker.to_string(), latest);
+                latest
+            }
+        };
+        let is_latest = job == latest;
+        let start = db.get_job_start(job)?;
+        let finish = db.get_job_finish(job)?;
+        let start_time = start
+            .as_ref()
+            .map(|x| Paw::Present(x.time))
+            .unwrap_or(if is_latest { Paw::Absent } else { Paw::What });
+        let start_cmd = start.map(|x| Paw::Present(x.cmd)).unwrap_or(if is_latest {
+            Paw::Absent
+        } else {
+            Paw::What
+        });
+        let finish_result = finish
+            .as_ref()
+            .map(|x| Paw::Present(x.result))
+            .unwrap_or(if is_latest { Paw::Absent } else { Paw::What });
+        let finish_time = finish
+            .as_ref()
+            .map(|x| Paw::Present(x.time))
+            .unwrap_or(if is_latest { Paw::Absent } else { Paw::What });
+        let finish_data = finish
+            .map(|x| Paw::Present(MaybeUtf8(x.data)))
+            .unwrap_or(if is_latest { Paw::Absent } else { Paw::What });
+        entries.push(JobStatus {
+            worker,
+            start_time,
+            start_cmd,
+            finish_result,
+            finish_time,
+            finish_data,
+        })
+    }
+    print!("{}", Table::new(entries).with(Style::pseudo_clean()));
+    Ok(())
+}
+
+#[derive(Tabled)]
+struct RunningStatus {
+    worker: String,
+    start_time: Time,
+    start_cmd: Command,
+}
+
+fn print_running_statuses(
+    jobs: impl IntoIterator<Item = jerbs::JobId>,
+    db: &Db,
+) -> jerbs::Result<()> {
+    let mut entries = Vec::new();
+    for job in jobs.into_iter() {
+        let worker = db.get_job_worker(job)?;
+        let start = db.get_job_start(job)?;
+        let start_time = start.as_ref().unwrap().time;
+        let start_cmd = start.unwrap().cmd;
+        entries.push(RunningStatus {
+            worker,
+            start_time,
+            start_cmd,
+        })
+    }
+    print!("{}", Table::new(entries).with(Style::pseudo_clean()));
+    Ok(())
+}
+
 fn main() -> jerbs::Result<()> {
     if std::env::args().len() < 2 {
         build_app(BuildingHelp::Short).print_help()?;
@@ -224,12 +348,20 @@ fn main() -> jerbs::Result<()> {
             let db = Db::open(path)?;
             let ids = db.job_ids_vec()?;
             if verbose {
+                let mut entries = Vec::new();
                 for id in ids {
                     let count = db.get_count(id)?;
+                    let priority = db.get_priority(id)?;
                     let data = db.get_data(id)?;
                     let data = std::str::from_utf8(&data).unwrap_or("<data>");
-                    println!("{}\t{}\t{}", id, count, data);
+                    entries.push(Task {
+                        id,
+                        count,
+                        priority,
+                        data: data.to_owned(),
+                    });
                 }
+                print!("{}", Table::new(entries).with(Style::pseudo_clean()));
             } else {
                 for id in ids {
                     println!("{}", id);
@@ -273,10 +405,7 @@ fn main() -> jerbs::Result<()> {
             let verbose = args.is_present("verbose");
             let mut db = Db::open(path)?;
             if verbose {
-                for job in db.get_started_jobs()? {
-                    let status = db.get_job_status(job)?;
-                    println!("{}\t{}", job, status);
-                }
+                print_running_statuses(db.get_started_jobs()?, &db)?;
             } else {
                 for job in db.get_started_jobs()? {
                     println!("{}", job);
@@ -287,10 +416,7 @@ fn main() -> jerbs::Result<()> {
             let verbose = args.is_present("verbose");
             let mut db = Db::open(path)?;
             if verbose {
-                for job in db.get_jobs()? {
-                    let status = db.get_job_status(job)?;
-                    println!("{}\t{}", job, status);
-                }
+                print_statuses(db.get_jobs()?, &db)?;
             } else {
                 for job in db.get_jobs()? {
                     println!("{}", job);
