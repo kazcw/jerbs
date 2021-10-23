@@ -110,6 +110,12 @@ fn build_app(help: BuildingHelp) -> App<'static, 'static> {
         SubCommand::with_name("monitor")
             .about("run a command, invoking log-start and log-finish appropriately")
             .arg(
+                Arg::with_name("requeue")
+                    .short("r")
+                    .long("requeue-on-fail")
+                    .help("If the command executes with non-zero status, put its job back in the queue"),
+            )
+            .arg(
                 Arg::with_name("worker-id")
                     .help("any string identifying the worker taking the job")
                     .required(true)
@@ -255,9 +261,9 @@ fn main() -> jerbs::Result<()> {
             if wait {
                 todo!("take --wait")
             } else {
-                let data = db.take(worker)?;
-                if let Some(data) = data {
-                    io::stdout().write_all(&data).unwrap();
+                let job = db.take(worker)?;
+                if let Some(job) = job {
+                    io::stdout().write_all(&job.data).unwrap();
                 } else {
                     std::process::exit(2);
                 }
@@ -296,11 +302,12 @@ fn main() -> jerbs::Result<()> {
             let worker = args.value_of("worker-id").unwrap();
             let logcmd = args
                 .values_of_os("command")
-                .map(|args| args
-                    .map(|x| x.to_os_string().into_vec())
-                    .collect())
+                .map(|args| args.map(|x| x.to_os_string().into_vec()).collect())
                 .unwrap_or(vec![]);
-            db.log_start(worker, logcmd)?;
+            let id = db
+                .current_job(worker)?
+                .expect("worker currently has no job");
+            db.log_start(id, logcmd)?;
         }
         ("log-finish", Some(args)) => {
             let mut db = Db::open(path)?;
@@ -310,12 +317,16 @@ fn main() -> jerbs::Result<()> {
                 .unwrap()
                 .parse()
                 .expect("result must be int");
-            db.log_finish(worker, result)?;
+            let id = db
+                .current_job(worker)?
+                .expect("worker currently has no job");
+            db.log_finish(id, result)?;
         }
         ("monitor", Some(args)) => {
             use std::os::unix::process::ExitStatusExt;
             use std::process::Command;
 
+            let requeue = args.is_present("requeue");
             let mut db = Db::open(path)?;
             let worker = args.value_of("worker-id").unwrap();
             let logcmd = args
@@ -323,32 +334,40 @@ fn main() -> jerbs::Result<()> {
                 .unwrap()
                 .map(|x| x.to_os_string().into_vec())
                 .collect();
-            db.log_start(worker, logcmd)?;
+            let id = db
+                .current_job(worker)?
+                .expect("worker currently has no job");
+            db.log_start(id, logcmd)?;
             let mut cmd = args.values_of_os("command").unwrap();
             let exe = cmd.next().unwrap();
             let result = Command::new(exe).args(cmd).status();
+            let log_code;
+            let my_exit;
             match result {
                 Ok(result) => {
                     // In the logs, we record signals as 256 + SIGNAL so it's always possible to
                     // distinguish them from regular exit codes.
-                    let log_code = result
+                    log_code = result
                         .code()
                         .unwrap_or_else(|| 256 + result.signal().unwrap());
                     // In our return value, we report signals as 128 + SIGNAL (like bash), since we don't
                     // have enough return value space to keep signals distinct from exit codes.
-                    let my_exit = result
+                    my_exit = result
                         .code()
                         .unwrap_or_else(|| 128 + result.signal().unwrap());
-                    db.log_finish(worker, log_code)?;
-                    std::process::exit(my_exit);
                 }
                 Err(e) => {
                     eprintln!("Failed to start command: {}", e);
                     const EXIT_FAILED_TO_START: i32 = 512;
-                    db.log_finish(worker, EXIT_FAILED_TO_START)?;
-                    std::process::exit(-1);
+                    log_code = EXIT_FAILED_TO_START;
+                    my_exit = -1;
                 }
             }
+            db.log_finish(id, log_code)?;
+            if requeue && log_code != 0 {
+                // TODO
+            }
+            std::process::exit(my_exit);
         }
         _ => build_app(BuildingHelp::Short).print_help()?,
     }

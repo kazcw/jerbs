@@ -28,9 +28,10 @@ impl Display for Error {
 impl std::error::Error for Error {}
 pub type Result<T> = anyhow::Result<T>;
 
-struct Task {
-    id: TaskId,
-    data: Vec<u8>,
+#[derive(PartialEq, Eq, Debug)]
+pub struct Job {
+    pub id: JobId,
+    pub data: Vec<u8>,
 }
 
 pub struct Db {
@@ -136,12 +137,13 @@ impl Db {
         Ok(Self { conn })
     }
 
-    pub fn take(&mut self, worker: &str) -> Result<Option<Vec<u8>>> {
+    pub fn take(&mut self, worker: &str) -> Result<Option<Job>> {
         const JOB_Q: &str = "SELECT task.id, task.data FROM task \
            LEFT JOIN (SELECT job.task, count(1) as c FROM job GROUP BY job.task) as w
            ON w.task = task.id \
-         WHERE COALESCE(w.c, 0) < task.count ORDER BY task.id LIMIT 1";
-        let task;
+         WHERE COALESCE(w.c, 0) < task.count \
+         ORDER BY COALESCE(task.priority, 0), task.id LIMIT 1";
+        let job;
         let tx = self.conn.transaction()?;
         {
             let mut job_q = tx.prepare(JOB_Q)?;
@@ -150,21 +152,21 @@ impl Db {
                 Some(row) => row,
                 None => return Ok(None),
             };
-            task = Task {
+            job = Job {
                 id: row.get(0)?,
                 data: row.get(1)?,
             };
             tx.execute(
                 "INSERT INTO job (task, worker) VALUES (?, ?)",
-                params![task.id, worker],
+                params![job.id, worker],
             )?;
         }
         tx.commit()?;
 
-        Ok(Some(task.data))
+        Ok(Some(job))
     }
 
-    pub fn new_job(&mut self, data: &[u8], count: u64, priority: Option<u32>) -> Result<u32> {
+    pub fn new_job(&mut self, data: &[u8], count: u64, priority: Option<i32>) -> Result<u32> {
         self.conn.execute(
             "INSERT INTO task (data, count, priority) VALUES (?, ?, ?)",
             params![data, count, priority],
@@ -215,12 +217,18 @@ impl Db {
         Ok(if w > c { 0 } else { c - w })
     }
 
-    pub fn log_start(&mut self, worker: &str, cmd: Vec<Vec<u8>>) -> Result<()> {
+    pub fn current_job(&mut self, worker: &str) -> Result<Option<JobId>> {
         let mut q = self
             .conn
             .prepare("SELECT id FROM job WHERE worker = ? ORDER BY id DESC LIMIT 1")?;
         let mut rows = q.query([worker])?;
-        let job: JobId = rows.next()?.unwrap().get(0)?;
+        Ok(match rows.next()? {
+            Some(row) => row.get(0)?,
+            None => None,
+        })
+    }
+
+    pub fn log_start(&mut self, job: JobId, cmd: Vec<Vec<u8>>) -> Result<()> {
         let cmd = Command(cmd);
         self.conn.execute(
             "INSERT INTO job_start (job, time, cmd) VALUES (?, date('now'), ?)",
@@ -229,12 +237,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn log_finish(&mut self, worker: &str, result: i32) -> Result<()> {
-        let mut q = self
-            .conn
-            .prepare("SELECT id FROM job WHERE worker = ? ORDER BY id DESC LIMIT 1")?;
-        let mut rows = q.query([worker])?;
-        let job: JobId = rows.next()?.unwrap().get(0)?;
+    pub fn log_finish(&mut self, job: JobId, result: i32) -> Result<()> {
         self.conn.execute(
             "INSERT INTO job_finish (job, result, time) VALUES (?, ?, date('now'))",
             params![job, result],
@@ -466,14 +469,14 @@ mod test {
         assert_eq!(count, INITIAL_COUNT);
 
         // check that take() works
-        let blob = db.take("some worker id")?.unwrap();
-        assert_eq!(&blob, BLOB);
+        let job = db.take("some worker id")?.unwrap();
+        assert_eq!(job.id, id);
         assert_eq!(db.get_count(id)?, 1);
-        let blob = db.take("some worker id")?.unwrap();
-        assert_eq!(&blob, BLOB);
+        let job = db.take("some worker id")?.unwrap();
+        assert_eq!(job.id, id);
         assert_eq!(db.get_count(id)?, 0);
-        let result = db.take("some worker id")?;
-        assert_eq!(result, None);
+        let job = db.take("some worker id")?;
+        assert_eq!(job, None);
         assert_eq!(db.get_count(id)?, 0);
         assert_eq!(db.job_ids_vec()?.len(), 0);
 
@@ -491,20 +494,50 @@ mod test {
         db.new_job(BLOB, INITIAL_COUNT, None)?;
 
         assert_eq!(db.get_started_jobs()?.len(), 0);
-        let _ = db.take("worker id")?.unwrap();
+        let job = db.take("worker id")?.unwrap();
         assert_eq!(db.get_started_jobs()?.len(), 0);
-        db.log_start("worker id", vec![])?;
+        db.log_start(job.id, vec![])?;
         assert_eq!(db.get_started_jobs()?.len(), 1);
-        db.log_finish("worker id", 0)?;
+        db.log_finish(job.id, 0)?;
         assert_eq!(db.get_started_jobs()?.len(), 0);
 
         Ok(())
     }
-}
 
-/*
- * priority:
- * - like nice: default=0, lower is higher
- * - within a priority level:
- *   - try to balance running jobs among tasks
- */
+    #[test]
+    fn test_priority() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut db = Db::create_from_conn(conn)?;
+
+        // some job creation
+        let id_defaultgroup = db.new_job(b"default group", 1, None)?;
+        let id_firstgroup0 = db.new_job(b"firstgroup 0", 2, Some(-10))?;
+        let id_firstgroup1 = db.new_job(b"firstgroup 1", 1, Some(-10))?;
+
+        // should round-robin through the lowest-priority group
+        assert_eq!(db.take("worker id")?.unwrap().id, id_firstgroup0);
+        assert_eq!(db.take("worker id")?.unwrap().id, id_firstgroup0);
+        assert_eq!(db.take("worker id")?.unwrap().id, id_firstgroup1);
+
+        // then do the mid-priority group
+        assert_eq!(db.take("worker id")?.unwrap().id, id_defaultgroup);
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn test_order() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut db = Db::create_from_conn(conn)?;
+
+        let id0 = db.new_job(b"firstgroup 0", 2, Some(-10))?;
+        let id1 = db.new_job(b"firstgroup 1", 1, Some(-10))?;
+
+        // should round-robin through the lowest-priority group
+        assert_eq!(db.take("worker id")?.unwrap().id, id0);
+        assert_eq!(db.take("worker id")?.unwrap().id, id0);
+        assert_eq!(db.take("worker id")?.unwrap().id, id1);
+        Ok(())
+    }
+}
