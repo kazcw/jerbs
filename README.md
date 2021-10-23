@@ -17,19 +17,19 @@ cargo install jerbs
 
 Create a job database:
 ```
-$ jerbs work.db new
+$ jerbs work.db init
 ```
 
 Define a job and enqueue some repetitions:
 ```
-$ jerbs work.db new-job --count 17 <<< "info for thing to do 17 times"
+$ jerbs work.db create --count 17 --data "info for thing to do 17 times"
 1
 ```
 The output is the job id, which you can use to edit the job later.
 
 See what's scheduled:
 ```
-$ jerbs work.db list-jobs -v
+$ jerbs work.db list-available -v
 1       17      "info for thing to do 17 times"
 ```
 (Note: do not use verbose output (`-v`) for scripting. It is intended to be
