@@ -20,3 +20,6 @@ bincode = "1.3"
 [dev-dependencies]
 assert_cmd = "2.0"
 tempfile = "3.2"
+
+[features]
+default = ["rusqlite/bundled"]

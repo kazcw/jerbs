@@ -7,8 +7,7 @@ Command-line work-stealing scheduler.
 If you use the **Nix** package manager, there's a package in [my
 overlay](https://github.com/kazcw/phoe.nix).
 
-**Otherwise**, you can build `jerbs` with cargo. Make sure you have sqlite3
-libraries installed, then run:
+**Otherwise**, you can build `jerbs` with cargo:
 ```
 cargo install jerbs
 ```
