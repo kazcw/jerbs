@@ -1,3 +1,5 @@
+[![Build Status](https://app.travis-ci.com/kazcw/jerbs.svg?branch=master)](https://app.travis-ci.com/kazcw/jerbs)
+
 # jerbs
 
 Command-line work-stealing scheduler.
