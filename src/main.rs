@@ -131,6 +131,28 @@ fn build_app(help: BuildingHelp) -> App<'static, 'static> {
                     .multiple(true)
                     .last(true),
             ),
+        SubCommand::with_name("modify")
+            .about("alter an existing job")
+            .arg(
+                Arg::with_name("id")
+                    .help("the id identifying the job")
+                    .required(true)
+                    .index(1),
+            )
+            .arg(
+                Arg::with_name("add")
+                    .help("the number of repetitions to add to the queue (can be negative)")
+                    .short("a")
+                    .long("add")
+                    .takes_value(true),
+            )
+            .arg(
+                Arg::with_name("priority")
+                    .help("the job's new priority (low = do sooner, default = 0)")
+                    .short("p")
+                    .long("priority")
+                    .takes_value(true),
+            ),
     ];
     let uncommon_subcommands = vec![
         SubCommand::with_name("get-data")
@@ -342,6 +364,26 @@ fn main() -> jerbs::Result<()> {
                 db.new_job(&data, count, priority)?
             };
             println!("{}", id);
+        }
+        ("modify", Some(args)) => {
+            let task = args
+                .value_of("id")
+                .unwrap()
+                .parse()
+                .expect("job id must be integer");
+            let add = args
+                .value_of("add")
+                .map(|x| x.parse().expect("add must be integer"));
+            let prio = args
+                .value_of("priority")
+                .map(|x| x.parse().expect("priority must be integer"));
+            let db = Db::open(path)?;
+            if let Some(add) = add {
+                db.add_count(task, add)?;
+            }
+            if let Some(prio) = prio {
+                db.set_priority(task, prio)?;
+            }
         }
         ("list-available", Some(args)) => {
             let verbose = args.is_present("verbose");

@@ -227,6 +227,22 @@ impl Db {
         Ok(prio.unwrap_or(0))
     }
 
+    pub fn set_priority(&self, task: TaskId, priority: i32) -> Result<()> {
+        let mut q = self
+            .conn
+            .prepare("UPDATE task SET priority = ? WHERE id = ?")?;
+        q.execute(params![priority, task])?;
+        Ok(())
+    }
+
+    pub fn add_count(&self, task: TaskId, add: i64) -> Result<()> {
+        let mut q = self
+            .conn
+            .prepare("UPDATE task SET count = count + ? WHERE id = ?")?;
+        q.execute(params![add, task])?;
+        Ok(())
+    }
+
     pub fn current_job(&mut self, worker: &str) -> Result<Option<JobId>> {
         let mut q = self
             .conn
@@ -529,6 +545,21 @@ mod test {
         assert_eq!(db.take("worker id")?.unwrap().id, id0);
         assert_eq!(db.take("worker id")?.unwrap().id, id0);
         assert_eq!(db.take("worker id")?.unwrap().id, id1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_modify() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut db = Db::create_from_conn(conn)?;
+
+        let task = db.new_job(b"jobjobjob", 3, None)?;
+        assert_eq!(db.get_count(task)?, 3);
+        assert_eq!(db.get_priority(task)?, 0);
+        db.add_count(task, -2)?;
+        db.set_priority(task, -7)?;
+        assert_eq!(db.get_count(task)?, 1);
+        assert_eq!(db.get_priority(task)?, -7);
         Ok(())
     }
 }
